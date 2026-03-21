@@ -1,0 +1,285 @@
+// SIT202 - Task 5.2C - My DNS Server Pseudocode
+
+
+// =====================================================
+// PART 1 — SERVER INITIALIZATION
+// =====================================================
+
+// First things first — we need to set up the server
+// before it can do anything useful
+
+// Set the port number to 53
+// Every DNS server in the world uses port 53
+// so clients know where to send their queries
+SET server_port = 53
+
+// Set the IP to 0.0.0.0 so the server listens
+// on all network interfaces not just one
+SET server_ip = '0.0.0.0'
+
+// Set the maximum message size to 512 bytes
+// This is the standard limit for DNS messages
+SET buffer_size = 512
+
+
+// Now we load all our DNS records into memory
+// We do this at the start so the server can
+// answer queries quickly without reading files
+
+// A records — these match a website name to an IP address
+// For example when someone asks for www.deakin.edu.au
+// we give them back 192.168.1.10
+SET dns_A_records = {
+    'www.deakin.edu.au'     : '192.168.1.10',
+    'mail.deakin.edu.au'    : '192.168.1.20',
+    'library.deakin.edu.au' : '192.168.1.30',
+    'portal.deakin.edu.au'  : '192.168.1.40'
+}
+
+// CNAME records — these match an alias name to
+// the real domain name it points to
+// For example learn.deakin.edu.au is just
+// a shortcut for portal.deakin.edu.au
+SET dns_CNAME_records = {
+    'webmail.deakin.edu.au' : 'mail.deakin.edu.au',
+    'learn.deakin.edu.au'   : 'portal.deakin.edu.au'
+}
+
+
+// Create a UDP socket
+// Think of this like opening a phone line
+// so the server and clients can talk to each other
+// We use UDP because DNS messages are small and
+// UDP is faster than TCP for this kind of task
+CREATE udp_socket USING protocol = UDP
+
+
+// Bind the socket to our IP address and port
+// This tells the operating system that any message
+// coming in on port 53 should go to this program
+BIND udp_socket TO (server_ip, server_port)
+
+// If binding failed it means port 53 is already
+// being used by something else so we stop here
+IF binding failed:
+    PRINT 'ERROR: Port 53 is already in use. Cannot start server.'
+    STOP server
+END IF
+
+
+// Everything is ready — print a message to confirm
+// the server has started successfully
+PRINT 'DNS Server is now running on port ' + server_port
+PRINT 'A records loaded      : ' + COUNT(dns_A_records)
+PRINT 'CNAME records loaded  : ' + COUNT(dns_CNAME_records)
+PRINT 'Waiting for queries...'
+
+
+// =====================================================
+// PART 2 — LISTENING AND PROCESSING DNS QUERIES
+// =====================================================
+
+// The server now enters a loop that never stops
+// It keeps waiting and handling one query at a time
+LOOP forever:
+
+
+    // Wait here until a query arrives from a client
+    // The server does nothing until a message comes in
+    // client_address tells us who sent the query
+    RECEIVE (raw_data, client_address) FROM udp_socket
+    PRINT 'Query received from: ' + client_address
+
+
+    // Before we do anything with the message
+    // we check if it is a valid size
+    // A proper DNS message must be at least 12 bytes
+    // If it is too small or too big we throw it away
+    IF LENGTH(raw_data) < 12 OR LENGTH(raw_data) > buffer_size:
+        PRINT 'ERROR: Message size is not valid — ignoring it'
+        CONTINUE  // go back and wait for the next query
+    END IF
+
+
+    // The message looks valid so now we read it
+    // and pull out the three things we need
+    SET dns_message    = PARSE_DNS_MESSAGE(raw_data)
+
+    // The transaction ID is a unique number that helps
+    // the client match our reply to their original query
+    SET transaction_id = dns_message.header.id
+
+    // The hostname is what the client wants to look up
+    // for example www.deakin.edu.au
+    SET query_hostname = dns_message.question.hostname
+
+    // The query type tells us what kind of record
+    // the client is asking for — either A or CNAME
+    SET query_type     = dns_message.question.type
+
+    PRINT 'Looking up  : ' + query_hostname
+    PRINT 'Record type : ' + query_type
+
+
+    // Now we decide where to send this query
+    // If it is an A type we handle it as an A record
+    // If it is a CNAME type we handle it as a CNAME record
+    // If it is something else we send back an error
+    IF query_type == 'A'     THEN GO TO PART 3 — Handle A Record
+    IF query_type == 'CNAME' THEN GO TO PART 3 — Handle CNAME Record
+    ELSE:
+        PRINT 'ERROR: Query type not supported — ' + query_type
+        GO TO PART 4 — Send Error Response
+    END IF
+
+
+END LOOP
+
+
+// =====================================================
+// PART 3 — HANDLING A AND CNAME RECORDS
+// =====================================================
+
+// This is where we actually search for the answer
+// We look in the correct table based on query type
+
+
+// ── Handle A Record ──────────────────────────────────
+// The client wants an IP address for a hostname
+IF query_type == 'A':
+
+    // Check if we have this hostname in our A records
+    IF query_hostname EXISTS IN dns_A_records:
+
+        // We found it — get the IP address
+        // and mark the status as FOUND
+        SET resolved_value  = dns_A_records[query_hostname]
+        SET response_type   = 'A'
+        SET response_status = 'FOUND'
+
+        // TTL is how long the client can save
+        // this answer before asking us again
+        // 300 seconds means 5 minutes
+        SET ttl_value = 300
+
+        PRINT 'Found A Record: ' + query_hostname + ' --> ' + resolved_value
+
+    ELSE:
+
+        // We do not have this hostname in our records
+        // so we mark it as NOT FOUND
+        SET response_status = 'NOT FOUND'
+        PRINT 'A Record not found for: ' + query_hostname
+
+    END IF
+
+
+// ── Handle CNAME Record ──────────────────────────────
+// The client wants the real domain name for an alias
+ELSE IF query_type == 'CNAME':
+
+    // Check if we have this alias in our CNAME records
+    IF query_hostname EXISTS IN dns_CNAME_records:
+
+        // We found it — get the real domain name
+        // and mark the status as FOUND
+        SET resolved_value  = dns_CNAME_records[query_hostname]
+        SET response_type   = 'CNAME'
+        SET response_status = 'FOUND'
+        SET ttl_value       = 300
+
+        PRINT 'Found CNAME Record: ' + query_hostname + ' --> ' + resolved_value
+
+    ELSE:
+
+        // The alias is not in our records
+        // so we mark it as NOT FOUND
+        SET response_status = 'NOT FOUND'
+        PRINT 'CNAME Record not found for: ' + query_hostname
+
+    END IF
+
+
+END IF
+// Done with the lookup — now move on to Part 4
+// to build and send the response back to the client
+
+
+// =====================================================
+// PART 4 — GENERATING AND SENDING DNS RESPONSES
+// =====================================================
+
+// Now we build the reply message to send back
+// to the client with the answer we just found
+
+
+// Build the response header
+// We copy the transaction ID from the original query
+// so the client knows this reply is for their request
+SET response_header = {
+    id     : transaction_id, // same ID as the original query
+    QR     : 1,              // 1 means this is a response
+    opcode : 0,              // 0 means this is a standard lookup
+    AA     : 1,              // 1 means we are the main authority
+    TC     : 0,              // 0 means the message is not cut short
+    RD     : 0,              // 0 means no recursion was asked for
+    RA     : 0               // 0 means we do not support recursion
+}
+
+
+// Now check if we found the record or not
+// and build the response body accordingly
+IF response_status == 'FOUND':
+
+    // We found the record so we build an answer
+    // that includes all the details the client needs
+    SET answer_record = {
+        name  : query_hostname, // the name the client asked about
+        type  : response_type,  // A or CNAME
+        class : 'IN',           // IN stands for Internet
+        ttl   : ttl_value,      // how long the client can cache this
+        rdata : resolved_value  // the IP address or real domain name
+    }
+
+    // Set RCODE to 0 which means no error
+    SET response_header.RCODE = 0
+    SET answer_count = 1
+
+ELSE:
+
+    // We did not find the record
+    // so we send back an empty answer with error code 3
+    // NXDOMAIN means the hostname simply does not exist
+    SET answer_record         = EMPTY
+    SET response_header.RCODE = 3  // 3 means name does not exist
+    SET answer_count          = 0
+    PRINT 'NXDOMAIN: No record found for: ' + query_hostname
+
+END IF
+
+
+// Put together the full response message
+// A DNS response has three parts —
+// the header, the original question echoed back,
+// and the answer we found
+SET response_message = BUILD_DNS_MESSAGE(
+    header   : response_header,
+    question : dns_message.question, // echo the question back
+    answer   : answer_record         // our answer or empty
+)
+
+
+// Convert the message into raw bytes
+// because that is how data travels over a network
+SET raw_response = ENCODE_TO_BYTES(response_message)
+
+
+// Finally send the response back to the client
+// using the same address they sent their query from
+SEND raw_response TO client_address VIA udp_socket
+PRINT 'Response sent to: ' + client_address
+PRINT 'Ready for next query...'
+
+// ── End of one full cycle ──
+// The server now goes back to Part 2
+// and waits for the next query to come in
